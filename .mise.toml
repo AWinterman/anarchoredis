@@ -1,0 +1,63 @@
+[tools]
+rust = "latest"
+golangci-lint = "latest"
+go = "latest"
+
+[env]
+REDIS_ZERO_DIR = ".local/redis-zero"
+REDIS_ONE_DIR = ".local/redis-one"
+REDIS_TWO_DIR = ".local/redis-two"
+AR_REDIS_SERVERS="unix://$REDIS_ZERO_SOCKET,unix://$REDIS_ONE_SOCKET,unix://REDIS_TWO_SOCKET"
+KAFKA_ADRESS="localhost:9092"
+REDIS_ADDRESS="localhost:6379"
+CLIENT_ID="anarchy"
+GROUP_ID="anarchy-1" # pod id in production
+REPLICATION_TCP_READ_TIMEOUT_MILLIS=500
+LISTEN_ADDRESS="localhost:3679"
+
+
+[tasks]
+lint = "golangci-lint run"
+
+[tasks.client1]
+run = """
+REDIS_ZERO_SOCKET="$REDIS_ZERO_DIR/.sock"
+valkey-cli -s "$REDIS_ZERO_SOCKET" 
+"""
+
+[tasks.kafka]
+run = """
+docker run -p 9092:9092 apache/kafka:3.9.0
+"""
+
+[tasks.valkey]
+run = """
+valkey-server --save "" --loglevel debug
+"""
+
+[tasks.watch-test]
+run = """
+gotestsum --format standard-verbose ./...
+"""
+
+[tasks.all]
+run = """
+mkdir -p "$REDIS_ZERO_DIR"
+mkdir -p "$REDIS_ONE_DIR"
+mkdir -p "$REDIS_TWO_DIR"
+
+REDIS_ZERO_SOCKET="$REDIS_ZERO_DIR/.sock"
+REDIS_ONE_SOCKET="$REDIS_ONE_DIR/.sock"
+REDIS_TWO_SOCKET="$REDIS_TWO_DIR/.sock"
+
+echo $REDIS_ZERO_DIR
+echo $REDIS_ZERO_SOCKET
+
+valkey-server --appendonly yes --dir "$PWD/$REDIS_ZERO_DIR" --port 0 --bind 127.0.0.1 --save "" --unixsocket "$PWD/$REDIS_ZERO_SOCKET" &
+valkey-server --appendonly yes --dir "$PWD/$REDIS_ONE_DIR" --port 0 --bind 127.0.0.1 --save "" --unixsocket "$PWD/$REDIS_ONE_SOCKET" &
+valkey-server --appendonly yes --dir "$PWD/$REDIS_TWO_DIR" --port 0 --bind 127.0.0.1 --save "" --unixsocket "$PWD/$REDIS_TWO_SOCKET" &
+
+etcd & 
+wait
+"""
+
