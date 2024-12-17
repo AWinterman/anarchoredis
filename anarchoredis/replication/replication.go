@@ -2,8 +2,7 @@
 
 // Description:
 
-// Package txn:
-package txn
+package replication
 
 import (
 	"bufio"
@@ -20,10 +19,21 @@ import (
 	"github.com/awinterman/anarchoredis/protocol"
 )
 
-// subscribe subscribes to a replication stream
-func subscribe(ctx context.Context, conf *Conf, msgFunc func(cmd *protocol.Message)) error {
-	conn, err := conf.Dialer.DialContext(ctx, "tcp", conf.RedisAddress)
+type Subscriber struct {
+	Dialer             net.Dialer
+	LeaderAddr, MyAddr string
+	Logger             *slog.Logger
+}
+
+// Subscribe subscribes to a replication stream
+func (s Subscriber) Subscribe(ctx context.Context, msgFunc func(cmd *protocol.Message) error) error {
+	conn, err := s.Dialer.DialContext(ctx, "tcp", s.LeaderAddr)
 	mu := &sync.Mutex{}
+	if err != nil {
+		return err
+	}
+
+	host, port, err := net.SplitHostPort(s.LeaderAddr)
 	if err != nil {
 		return err
 	}
@@ -42,14 +52,20 @@ func subscribe(ctx context.Context, conf *Conf, msgFunc func(cmd *protocol.Messa
 		protocol.NewBulkString(replids[0]),
 		protocol.NewBulkString(strconv.FormatInt(offset, 10)),
 	)
+	configure := protocol.NewOutgoingCommand("REPLCONF",
+		"listening-port", port,
+		"ip-address", host,
+		"rdb-filter-only", "",
+		"capa", "eof",
+		"ack", strconv.FormatInt(offset, 10),
+	)
 
 	slog.Debug("sending", "cmd", psync)
 	_, err = protocol.Write(rw, psync)
 	if err != nil {
 		return err
 	}
-
-	_, err = replconfInit(rw, offset, conf.ListenAddress)
+	_, err = protocol.Write(rw, configure)
 	if err != nil {
 		return err
 	}
@@ -85,7 +101,10 @@ func subscribe(ctx context.Context, conf *Conf, msgFunc func(cmd *protocol.Messa
 		atomic.AndInt64(&offset, read.OriginalSize)
 		if read.Indicator == protocol.Array {
 			if read.Array[0].Str != "PING" {
-				msgFunc(read)
+				err := msgFunc(read)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		slog.Debug("replication msg", "msg", read)
@@ -131,39 +150,6 @@ func infoReplication(rw *bufio.ReadWriter) ([]string, int64, error) {
 		}
 	}
 	return replids, offset, nil
-}
-
-func replconfInit(rw *bufio.ReadWriter, offset int64, addr string) (*protocol.Message, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil, err
-	}
-	command := protocol.NewOutgoingCommand("REPLCONF",
-		"listening-port", port,
-		"ip-address", host,
-		"rdb-filter-only", "",
-		"capa", "eof",
-		"ack", strconv.FormatInt(offset, 10),
-	)
-	slog.Debug("sending", "cmd", command)
-
-	_, err = protocol.Write(rw, command)
-	if err != nil {
-		return nil, err
-	}
-
-	err = rw.Writer.Flush()
-	if err != nil {
-		return nil, err
-	}
-
-	read, err := protocol.Read(rw)
-	if err != nil {
-		return nil, err
-	}
-
-	slog.Debug("received", "msg", read, "size", read.OriginalSize)
-	return read, nil
 }
 
 // replconfAck sends an ack back to the server

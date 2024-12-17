@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -31,10 +32,12 @@ func newReader() *reader {
 	return &r
 }
 
+var traceLevel = slog.Level(-8)
+
 func (r *reader) Read(conn *bufio.ReadWriter) (*Message, error) {
 	for {
 		t, err := conn.ReadByte()
-		slog.Debug("read type", "bytes", string(t), "error", err)
+		slog.Log(context.Background(), traceLevel, "read type", "bytes", string(t), "error", err)
 
 		if t == '\r' || t == '\n' {
 			continue
@@ -59,7 +62,7 @@ func (r *reader) Read(conn *bufio.ReadWriter) (*Message, error) {
 func (r *reader) string(conn *bufio.ReadWriter) (*Message, error) {
 	m := &Message{Indicator: String}
 	line, err := conn.ReadBytes('\n')
-	slog.Debug("read line", "bytes", string(line), "error", err)
+	slog.Log(context.Background(), traceLevel, "read line", "bytes", string(line), "error", err)
 
 	if err != nil {
 		return nil, err
@@ -125,7 +128,6 @@ func (r *reader) bulkString(conn *bufio.ReadWriter) (*Message, error) {
 	if count.Int == 0 {
 		return m, nil
 	}
-	slog.Debug("bulkstring of length", "count", count.Int)
 
 	var n = 0
 	for n < count.Int {
@@ -138,7 +140,6 @@ func (r *reader) bulkString(conn *bufio.ReadWriter) (*Message, error) {
 		m.Str += string(b[0:s])
 		m.OriginalSize += int64(s)
 	}
-	slog.Debug("bulkstring", "contents", m.Str)
 
 	var eol = make([]byte, len(End))
 	var l = 0

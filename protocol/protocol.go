@@ -3,8 +3,8 @@ package protocol
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"math/big"
-	"net"
 	"strings"
 	"sync"
 )
@@ -169,7 +169,7 @@ func (conn *Conn) Flush() error {
 	return conn.rw.Flush()
 }
 
-func NewConnection(conn net.Conn) *Conn {
+func NewConnection(conn io.ReadWriter) *Conn {
 	return &Conn{rw: bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))}
 
 }
