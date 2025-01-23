@@ -3,7 +3,7 @@
 // Description:
 
 // Package anarchoredis:
-package anarchoredis
+package kafka
 
 import (
 	"bytes"

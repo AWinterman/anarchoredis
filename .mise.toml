@@ -22,7 +22,7 @@ lint = "golangci-lint run"
 [tasks.client1]
 run = """
 REDIS_ZERO_SOCKET="$REDIS_ZERO_DIR/.sock"
-valkey-cli -s "$REDIS_ZERO_SOCKET" 
+valkey-cli -s "$REDIS_ZERO_SOCKET" --loglevel verbose
 """
 
 [tasks.kafka]
@@ -30,34 +30,13 @@ run = """
 docker run -p 9092:9092 apache/kafka:3.9.0
 """
 
-[tasks.valkey]
+[tasks.'test:valkey-single']
 run = """
-valkey-server --save "" --loglevel debug
+valkey-server --save ""  --loglevel verbose
 """
 
-[tasks.watch-test]
-run = """
-gotestsum --format standard-verbose ./...
+
+[tasks.'test:watch']
+run ="""
+gotestsum --watch --format standard-verbose ./anarchoredis/replication
 """
-
-[tasks.all]
-run = """
-mkdir -p "$REDIS_ZERO_DIR"
-mkdir -p "$REDIS_ONE_DIR"
-mkdir -p "$REDIS_TWO_DIR"
-
-REDIS_ZERO_SOCKET="$REDIS_ZERO_DIR/.sock"
-REDIS_ONE_SOCKET="$REDIS_ONE_DIR/.sock"
-REDIS_TWO_SOCKET="$REDIS_TWO_DIR/.sock"
-
-echo $REDIS_ZERO_DIR
-echo $REDIS_ZERO_SOCKET
-
-valkey-server --appendonly yes --dir "$PWD/$REDIS_ZERO_DIR" --port 0 --bind 127.0.0.1 --save "" --unixsocket "$PWD/$REDIS_ZERO_SOCKET" &
-valkey-server --appendonly yes --dir "$PWD/$REDIS_ONE_DIR" --port 0 --bind 127.0.0.1 --save "" --unixsocket "$PWD/$REDIS_ONE_SOCKET" &
-valkey-server --appendonly yes --dir "$PWD/$REDIS_TWO_DIR" --port 0 --bind 127.0.0.1 --save "" --unixsocket "$PWD/$REDIS_TWO_SOCKET" &
-
-etcd & 
-wait
-"""
-

@@ -26,6 +26,8 @@ type Store struct {
 var sentinel = []byte("OK")
 var keyprefix = "anarcho:key:"
 
+// UnlockKeys removes locks for the given keys by deleting them from the database with the specified prefix.
+// Returns an error if any operation fails during the unlock process.
 func (b Store) UnlockKeys(keys []string) error {
 	return b.DB.Update(func(txn *badger.Txn) error {
 		for _, key := range keys {
@@ -39,6 +41,9 @@ func (b Store) UnlockKeys(keys []string) error {
 	})
 }
 
+// AwaitUnlocked waits until all keys involved in the provided command are no longer locked in the database.
+// It checks for locks and subscribes to listen for unlock events if any keys are locked.
+// Returns nil when all locks are released or an error if there is an issue during the process.
 func (b Store) AwaitUnlocked(ctx context.Context, cmd *protocol.Command) error {
 	keys, err := cmd.Keys()
 	if err != nil {
@@ -97,6 +102,8 @@ func (b Store) AwaitUnlocked(ctx context.Context, cmd *protocol.Command) error {
 	return err
 }
 
+// LockKeys locks the keys involved in the given command with a specified TTL in the database.
+// Returns an error if any operation fails during the locking process.
 func (b Store) LockKeys(cmd *protocol.Command) error {
 	keys, err := cmd.Keys()
 	if err != nil {

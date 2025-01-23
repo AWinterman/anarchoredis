@@ -49,21 +49,39 @@ func (conf *Conf) LoadEnv() {
 	slog.Info("env loaded", "conf", conf)
 }
 
+// Transactor is an bastraction around a redis connection that waits to acknowledge writes until they have been
+// persisted to an external datastructure, meaning not just written to an AOF file (with fsync or no), but also sent
+// to e.g. a raft cluster.
+//
+// It uses a localstore to keep track of which keys are pending,
+// and delays writes and reads to those keys until they have been committed to the distributed log.
 type Transactor struct {
 	conf                       *Conf
 	keys                       *localstate.Store
 	redisReplicationSubscriber *replication.Subscriber
-	txnlog                     *TxnLog
+	txnlog                     TxnLog
 	database                   *atomic.Pointer[string]
 }
 
-func NewTransactor(ctx context.Context, conf *Conf) (*Transactor, error) {
+type TxnLog interface {
+	Append(ctx context.Context, msg *protocol.Message, database string) error
+}
+
+func NewSubscriber(conf *Conf) *replication.Subscriber {
+	return &replication.Subscriber{
+		Dialer:     conf.Dialer,
+		LeaderAddr: conf.RedisAddress,
+		MyAddr:     conf.ListenAddress,
+		Logger:     slog.With("comp", "replication"),
+	}
+}
+
+func NewTransactor(ctx context.Context, conf *Conf, transactionLog TxnLog) (*Transactor, error) {
 	db, err := badger.Open(badger.DefaultOptions(conf.LocalStateDir).WithInMemory(conf.LocalStateDir == ""))
 	if err != nil {
 		return nil, fmt.Errorf("badgerdb.Open(): %w", err)
 	}
 
-	log, err := NewTxnLog(conf.ClientID, conf.KafkaAddress, conf.Topic)
 	transactor := Transactor{
 		conf,
 		&localstate.Store{DB: db, Log: slog.With("comp", "key-lock")},
@@ -73,7 +91,7 @@ func NewTransactor(ctx context.Context, conf *Conf) (*Transactor, error) {
 			MyAddr:     conf.ListenAddress,
 			Logger:     slog.With("comp", "replication"),
 		},
-		log,
+		transactionLog,
 		&atomic.Pointer[string]{},
 	}
 	database := "0"
@@ -96,40 +114,11 @@ func (t *Transactor) Transact(ctx context.Context, conn net.Conn) error {
 	g := errgroup.Group{}
 
 	g.Go(func() error {
-		return t.redisReplicationSubscriber.Subscribe(ctx,
+		return t.redisReplicationSubscriber.StreamUpdates(
+			ctx,
 			func(msg *protocol.Message) error {
-				ctx, cancel := context.WithCancelCause(ctx)
-				defer cancel(nil)
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
+				return t.handleMessages(msg, ctx)
 
-				cmd, err := msg.Cmd()
-				if err != nil {
-					return err
-				}
-
-				keys, err := cmd.Keys()
-				if err != nil {
-					return err
-				}
-
-				err = t.txnlog.Append(ctx, msg, func(mgs *protocol.Message, err error) {
-					if err == nil {
-						err := t.keys.UnlockKeys(keys)
-						if err != nil {
-							cancel(err)
-						}
-						return
-					}
-					cancel(err)
-				})
-
-				if err != nil {
-					return err
-				}
-
-				return context.Cause(ctx)
 			})
 	})
 	g.Go(func() error {
@@ -143,6 +132,37 @@ func (t *Transactor) Transact(ctx context.Context, conn net.Conn) error {
 	})
 
 	return g.Wait()
+}
+
+// handleMessages processes a protocol message within a transaction and updates the transaction log and key state.
+func (t *Transactor) handleMessages(msg *protocol.Message, ctx context.Context) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	cmd, err := msg.Cmd()
+	if err != nil {
+		return err
+	}
+
+	keys, err := cmd.Keys()
+	if err != nil {
+		return err
+	}
+
+	err = t.txnlog.Append(ctx, msg, *t.database.Load())
+	if err != nil {
+		return err
+	}
+
+	err = t.keys.UnlockKeys(keys)
+	if err != nil {
+		return err
+	}
+
+	return context.Cause(ctx)
 }
 
 func (t *Transactor) proxy(ctx context.Context, connection *protocol.Conn, upstream *protocol.Conn) error {

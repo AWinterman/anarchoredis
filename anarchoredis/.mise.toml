@@ -1,0 +1,6 @@
+[env]
+REDIS_ADDRESS="localhost:6379"
+CLIENT_ID="anarchy"
+GROUP_ID="anarchy-1" # pod id in production
+REPLICATION_TCP_READ_TIMEOUT_MILLIS=500
+LISTEN_ADDRESS="localhost:3679"

@@ -3,8 +3,12 @@ package protocol
 import (
 	"errors"
 	"fmt"
+	"io"
+	"iter"
 	"slices"
 	"strings"
+
+	"github.com/awinterman/anarchoredis/protocol/message"
 )
 
 type Command struct {
@@ -12,12 +16,12 @@ type Command struct {
 	Name string
 
 	// Args are all the strings in the command after the name.
-	Args []string
+	Args iter.Seq2[Message, error]
 
 	Database string
 
 	// Message is the original message
-	Message *Message
+	Message message.Message
 }
 
 var commandsWithoutKey = map[string]bool{"FLUSHALL": true, "FLUSHDB": true, "SELECT": true, "FUNCTION": true,
@@ -27,6 +31,7 @@ var commandsWithSubOp = map[string]bool{"BITOP": true, "FUNCTION": true, "SCRIPT
 
 // ErrInvalidCommand is returned when a command is invalid
 var ErrInvalidCommand = errors.New("invalid command")
+var ErrNotImplemented = errors.New("not implemented")
 
 // Cmd reads a command from the msg
 //
@@ -41,79 +46,130 @@ var ErrInvalidCommand = errors.New("invalid command")
 // protocol version.
 //
 // at time of writing, this is exclusively parsing the aof file
-func (msg *Message) Cmd() (*Command, error) {
+func Cmd(msg message.Message) (*Command, error) {
 	cmd := &Command{}
 	cmd.Message = msg
 
-	if msg.Indicator != Array {
-		return nil, fmt.Errorf("%w; expected array got %s", ErrInvalidCommand, msg.Indicator)
+	if msg.Kind != Array {
+		return nil, fmt.Errorf("%w; expected array got %s", ErrInvalidCommand, msg.Kind)
 	}
 
-	for i := 0; i < len(msg.Array); i++ {
-		if msg.Array[i].Indicator != BulkString {
-			return nil, fmt.Errorf("%w; expected BulkString for %d-th element of message, string got %s",
-				ErrInvalidCommand, i, msg.Array[i].Indicator)
+	var i int
+	for arg, err := range msg.Seq {
+		i++
+		if err != nil {
+			return nil, err
 		}
-	}
-
-	if cmd.Name = strings.ToUpper(msg.Array[0].Str); cmd.Name == "" {
-		return nil, fmt.Errorf("%w; expected non-empty string for command name", ErrInvalidCommand)
-	}
-
-	var startIndex = 1
-
-	switch {
-	case commandsWithSubOp[cmd.Name]:
-		if len(msg.Array) < 3 {
-			return nil, fmt.Errorf("%w; expected at least three elements for command %s got %d", ErrInvalidCommand,
-				cmd.Name, len(msg.Array))
+		if arg.Kind != BulkString {
+			return nil, fmt.Errorf("%w; expected Bulk for %d-th element of message, string got %s",
+				ErrInvalidCommand, i, arg.Kind)
 		}
-		cmd.Name = cmd.Name + " " + strings.ToUpper(msg.Array[1].Str)
-		startIndex = 2
-	case !commandsWithoutKey[cmd.Name]:
-		if len(msg.Array) < 2 {
-			return nil, fmt.Errorf("%w; expected at least two elements for command %s got %d", ErrInvalidCommand,
-				cmd.Name, len(msg.Array))
+		all, err := arg.ReadAll()
+		if err != nil {
+			return nil, err
 		}
 
-	}
+		if i == 0 {
+			if cmd.Name = strings.ToUpper(all); cmd.Name == "" {
+				return nil, fmt.Errorf("%w; expected non-empty string for command name", ErrInvalidCommand)
+			}
+			if commandsWithoutKey[cmd.Name] {
+				if msg.RunLength > 2 {
+					return nil, fmt.Errorf("%w; expected at least two elements for command %s got %d", ErrInvalidCommand,
+						cmd.Name, msg.RunLength)
+				}
+			}
+			cmd.Args = msg.Seq
+		}
 
-	for i := startIndex; i < len(msg.Array); i++ {
-		cmd.Args = append(cmd.Args, msg.Array[i].Str)
+		if !commandsWithSubOp[cmd.Name] {
+			cmd.Args = msg.Seq
+			return cmd, nil
+		}
+		if i == 1 {
+			if msg.RunLength < 3 {
+				return nil, fmt.Errorf("%w; expected at least three elements for command %s got %d", ErrInvalidCommand,
+					cmd.Name, msg.RunLength)
+			}
+			readAll, err := arg.ReadAll()
+			if err != nil {
+				return nil, err
+			}
+			cmd.Name = cmd.Name + " " + strings.ToUpper(readAll)
+			cmd.Args = msg.Seq
+		}
 	}
 
 	return cmd, nil
 }
 
-func firstArgKeyFunc(args []string) ([]string, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("%w: expected at least one arguments command", ErrInvalidCommand)
+func firstN(n int) func(args iter.Seq2[Message, error], size int) ([]string, error) {
+	return func(args iter.Seq2[Message, error], size int) ([]string, error) {
+		if size < n {
+			return []string{}, fmt.Errorf("%w; expected at least %d argument for firstArgKey", ErrInvalidCommand, n)
+		}
+		var keys []string
+		var err error
+		args(func(m Message, err error) bool {
+			var all string
+			all, err = m.ReadAll()
+			if err != nil {
+				return false
+			}
+			keys = append(keys, all)
+			return len(keys) <= n
+		})
+		return keys, err
 	}
-	return args[0:1], nil
 }
 
+var firstArgKeyFunc = firstN(1)
+
 // oddIndices returns all the odd indices of args
-func oddIndices(args []string) ([]string, error) {
-	if len(args)%2 == 1 {
+func oddIndices(args iter.Seq2[Message, error], size int) ([]string, error) {
+	if size%2 == 1 {
 		return nil, fmt.Errorf("%w: expected an even number of arguments", ErrInvalidCommand)
 	}
 	// returns all the odd indices of args
 
 	var keys []string
-	for i := 1; i < len(args); i += 2 {
-		keys = append(keys, args[i])
-	}
+	var err error
+
+	args(func(m Message, err error) bool {
+		var all string
+		all, err = m.ReadAll()
+		if err != nil {
+			return false
+		}
+	})
+
 	return keys, nil
 }
 
+// allArgs processes a sequence of Messages and returns a slice of strings extracted from each Message using ReadAll.
+// If an error occurs while reading a Message, it terminates processing and returns the error encountered.
+func allArgs(args iter.Seq2[Message, error], _ int) ([]string, error) {
+	var keys []string
+	var err error
+	args(func(m Message, err error) bool {
+		var all string
+		all, err = m.ReadAll()
+		if err != nil {
+			return false
+		}
+		keys = append(keys, all)
+		return true
+	})
+	return keys, err
+}
+
 type CommandSpecification struct {
-	Keys       func([]string) ([]string, error)
+	Keys       func(iter.Seq2[Message, error], int) ([]string, error)
 	Categories []string
 }
 
-func noKeysFunc([]string) ([]string, error) {
+func noKeysFunc(iter.Seq2[Message, error], int) ([]string, error) {
 	return nil, nil
-
 }
 
 var cmdSpec = map[string]CommandSpecification{
@@ -121,7 +177,7 @@ var cmdSpec = map[string]CommandSpecification{
 	"SELECT": {noKeysFunc, []string{"fast", "connection"}},
 
 	//keyspace
-	"UNLINK":   {func(args []string) ([]string, error) { return args, nil }, []string{"keyspace", "write", "fast"}},
+	"UNLINK":   {allArgs, []string{"keyspace", "write", "fast"}},
 	"FLUSHALL": {noKeysFunc, []string{"keyspace", "write", "slow", "dangerous"}},
 
 	// strings
@@ -143,7 +199,7 @@ var cmdSpec = map[string]CommandSpecification{
 		return args[0:2], nil
 	}, []string{"read", "string", "slow"}},
 	// MGET key [key ...]
-	"MGET": {func(args []string) ([]string, error) { return args, nil }, []string{"read", "string", "fast"}},
+	"MGET": {allArgs, []string{"read", "string", "fast"}},
 	//MSET key value [key value ...]
 	"MSET":     {oddIndices, []string{"write", "string", "fast"}},
 	"MSETNX":   {oddIndices, []string{"write", "string", "fast"}},
@@ -163,9 +219,9 @@ var cmdSpec = map[string]CommandSpecification{
 func (cmd *Command) Keys() ([]string, error) {
 	specification, ok := cmdSpec[cmd.Name]
 	if !ok {
-		return nil, fmt.Errorf("%w: %s not supported", ErrInvalidCommand, cmd.Name)
+		return nil, fmt.Errorf("%w: %s %w", ErrInvalidCommand, cmd.Name, ErrNotImplemented)
 	}
-	return specification.Keys(cmd.Args)
+	return specification.Keys(cmd.Args, int(cmd.Message.RunLength))
 }
 
 // IsWrite says whether the command would result in a write if executed
